@@ -221,7 +221,7 @@ public class ConfPlannerAgent {
         // Diagnose it from the planning log + trace BEFORE reading this comment; the fix is on
         // branch lab4-after (restore s.slot()).
         var items = resolve(sessions, draft.sessionIds()).stream()
-                .map(s -> new ScheduleItem(s, "TBD"))
+                .map(s -> new ScheduleItem(s, s.slot()))
                 .toList();
         return new DraftSchedule(items, draft.rationale());
     }
