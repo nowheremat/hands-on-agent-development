@@ -72,8 +72,7 @@ public class ConfPlannerAgent {
                         - role: their job role if stated, else a reasonable guess
                         - experienceLevel: one of Beginner, Intermediate, Advanced
                         - goals: what they want out of the conference, as short phrases
-                        // TODO (Lab 1): also extract `avoidTopics` — things the attendee does
-                        //   not want (e.g. "no vendor keynotes"). See labs/lab1-dice.md.
+                        - avoidTopics: topics/technologies the attendee explicitly wants to avoid (e.g. "no vendor keynotes")
 
                         # Attendee request
                         %s
@@ -93,15 +92,14 @@ public class ConfPlannerAgent {
 
     @Action
     CandidateSessions shortlistSessions(AttendeeProfile profile, SessionCatalog catalog, Ai ai) {
-        var menu = catalog.sessions().stream()
+        var filteredMenu = catalog.sessions().stream()
+                .filter(s -> !profile.shouldAvoid(s))
                 .map(ConfPlannerAgent::menuLine)
                 .collect(Collectors.joining("\n"));
 
-        // TODO (Lab 1): once AttendeeProfile carries avoidTopics, exclude any session whose
-        //   tags intersect the avoid-list — either by filtering `menu` here, or by adding the
-        //   profile as a PromptContributor so the rule rides along in the prompt automatically.
         var shortlisting = ai
                 .withDefaultLlm()
+                .withPromptContributor(profile)
                 .creating(Shortlisting.class)
                 .fromPrompt("""
                         Pick the 8-14 sessions from the catalog that best match this attendee.
@@ -117,7 +115,7 @@ public class ConfPlannerAgent {
                         %s
                         """.formatted(
                         profile.interests(), profile.role(),
-                        profile.experienceLevel(), profile.goals(), menu));
+                        profile.experienceLevel(), profile.goals(), filteredMenu));
 
         var chosen = resolve(catalog, shortlisting.sessionIds());
         return new CandidateSessions(chosen);

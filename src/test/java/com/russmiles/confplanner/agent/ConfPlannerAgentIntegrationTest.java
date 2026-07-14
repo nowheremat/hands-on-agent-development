@@ -39,7 +39,8 @@ class ConfPlannerAgentIntegrationTest extends EmbabelMockitoIntegrationTest {
                 AttendeeProfile.class)
                 .thenReturn(new AttendeeProfile(
                         List.of("kubernetes", "resilience", "developer-experience"),
-                        "Senior Platform Engineer", "Advanced", List.of("level up platform work")));
+                        "Senior Platform Engineer", "Advanced", List.of("level up platform work"),
+                        List.of()));
 
         whenCreateObject(prompt -> prompt.contains("Pick the 8-14 sessions"),
                 ConfPlannerAgent.Shortlisting.class)

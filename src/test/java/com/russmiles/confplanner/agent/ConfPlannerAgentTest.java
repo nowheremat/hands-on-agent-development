@@ -27,7 +27,7 @@ class ConfPlannerAgentTest {
     void extractAttendeeProfilePutsTheRequestInThePrompt() {
         var context = FakeOperationContext.create();
         context.expectResponse(new AttendeeProfile(
-                List.of("kubernetes"), "Platform Engineer", "Advanced", List.of("ship faster")));
+                List.of("kubernetes"), "Platform Engineer", "Advanced", List.of("ship faster"), List.of()));
 
         Ai ai = context.ai();
         agent.extractAttendeeProfile(
@@ -46,10 +46,42 @@ class ConfPlannerAgentTest {
                 List.of("PC-01", "AI-01", "does-not-exist"), "matches interests"));
 
         var profile = new AttendeeProfile(
-                List.of("kubernetes", "ai"), "Engineer", "Intermediate", List.of("learn"));
+                List.of("kubernetes", "ai"), "Engineer", "Intermediate", List.of("learn"), List.of());
         var candidates = agent.shortlistSessions(profile, catalogService.catalog(), context.ai());
 
         var ids = candidates.sessions().stream().map(s -> s.id()).toList();
         assertEquals(List.of("PC-01", "AI-01"), ids, "unknown ids are dropped, real ones resolved");
+    }
+
+    @Test
+    void avoidedTopicsAreExcludedFromTheShortlistMenu() {
+        var context = FakeOperationContext.create();
+        context.expectResponse(new ConfPlannerAgent.Shortlisting(List.of(), "no matches"));
+
+        var profile = new AttendeeProfile(
+                List.of("kubernetes"), "Engineer", "Intermediate", List.of("learn"),
+                List.of("security"));
+
+        var candidates = agent.shortlistSessions(profile, catalogService.catalog(), context.ai());
+
+        var tags = candidates.sessions().stream()
+                .flatMap(s -> s.tags().stream())
+                .toList();
+        assertTrue(tags.stream().noneMatch(t -> t.equalsIgnoreCase("security")),
+                "sessions tagged security should be filtered out before shortlisting");
+    }
+
+    @Test
+    void shouldAvoidIsCaseInsensitiveOnTags() {
+        var profile = new AttendeeProfile(
+                List.of(), "Engineer", "Intermediate", List.of(), List.of("Kubernetes"));
+        var catalog = catalogService.catalog();
+        var kubernetesSession = catalog.sessions().stream()
+                .filter(s -> s.tags().stream().anyMatch(t -> t.equalsIgnoreCase("kubernetes")))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("No kubernetes-tagged session in catalog"));
+
+        assertTrue(profile.shouldAvoid(kubernetesSession),
+                "shouldAvoid must match tags case-insensitively");
     }
 }

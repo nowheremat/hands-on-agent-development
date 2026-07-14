@@ -1,5 +1,7 @@
 package com.russmiles.confplanner.domain;
 
+import com.embabel.common.ai.prompt.PromptContributor;
+
 import java.util.List;
 
 /**
@@ -17,9 +19,25 @@ public record AttendeeProfile(
         List<String> interests,
         String role,
         String experienceLevel,
-        List<String> goals
-        // TODO (Lab 1): add `List<String> avoidTopics` here, then make this record a
-        //   PromptContributor so the avoid-list travels with the domain object into the prompt.
-        //   See labs/lab1-dice.md. The after-state lives on branch lab1-after.
-) {
+        List<String> goals,
+        List<String> avoidTopics
+) implements PromptContributor {
+
+    @Override
+    public String contribution() {
+        if (avoidTopics == null || avoidTopics.isEmpty()) {
+            return "";
+        }
+        return "The attendee wants to AVOID these topics: " + String.join(", ", avoidTopics)
+                + ". Never recommend a session tagged with them.";
+    }
+
+    public boolean shouldAvoid(Session session) {
+        if (avoidTopics == null || avoidTopics.isEmpty()) {
+            return false;
+        }
+        return session.tags().stream()
+                .anyMatch(tag -> avoidTopics.stream()
+                        .anyMatch(avoid -> avoid.equalsIgnoreCase(tag)));
+    }
 }
