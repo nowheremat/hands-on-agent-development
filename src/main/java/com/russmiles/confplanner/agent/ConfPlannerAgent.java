@@ -3,11 +3,15 @@ package com.russmiles.confplanner.agent;
 import com.embabel.agent.api.annotation.AchievesGoal;
 import com.embabel.agent.api.annotation.Action;
 import com.embabel.agent.api.annotation.Agent;
+import com.embabel.agent.api.annotation.Condition;
 import com.embabel.agent.api.common.Ai;
 import com.embabel.agent.domain.io.UserInput;
+import com.embabel.agent.mcpserver.security.SecureAgentTool;
 import com.russmiles.confplanner.domain.AttendeeProfile;
 import com.russmiles.confplanner.domain.CandidateSessions;
+import com.russmiles.confplanner.domain.DraftSchedule;
 import com.russmiles.confplanner.domain.PersonalSchedule;
+import com.russmiles.confplanner.domain.PremiumBriefing;
 import com.russmiles.confplanner.domain.ResearchedSessions;
 import com.russmiles.confplanner.domain.ScheduleItem;
 import com.russmiles.confplanner.domain.Session;
@@ -25,14 +29,16 @@ import java.util.stream.Collectors;
  *
  * <p>The agent is defined as a set of typed {@code @Action}s. It does <em>not</em> hard-wire a
  * sequence: each action declares the types it consumes and the type it produces, and Embabel's
- * planner (GOAP) derives the order. For the baseline the inferred plan reads:
+ * planner (GOAP) derives the order. The inferred plan reads:
  *
  * <pre>
  *   UserInput
- *     -&gt; extractAttendeeProfile  (LLM)      =&gt; AttendeeProfile
+ *     -&gt; extractAttendeeProfile  (LLM)       =&gt; AttendeeProfile
  *     -&gt; loadCatalog             (plain code) =&gt; SessionCatalog
- *     -&gt; shortlistSessions       (LLM)      =&gt; CandidateSessions
- *     -&gt; assembleSchedule        (LLM, goal) =&gt; PersonalSchedule
+ *     -&gt; shortlistSessions       (LLM)       =&gt; CandidateSessions  [post: hasCandidates]
+ *     -&gt; researchSessions        (LLM)       =&gt; ResearchedSessions
+ *     -&gt; assembleSchedule        (LLM)       =&gt; DraftSchedule      [post: noDoubleBooking]
+ *     -&gt; confirmSchedule         (code, goal) =&gt; PersonalSchedule  [pre: noDoubleBooking]
  * </pre>
  *
  * <p>Run it from the shell with {@code x "I'm a senior platform engineer into Kubernetes,
@@ -101,7 +107,7 @@ public class ConfPlannerAgent {
 
     // --- 3. Shortlist sessions that match the attendee (LLM) ------------------------------
 
-    @Action
+    @Action(post = {"hasCandidates"})
     CandidateSessions shortlistSessions(AttendeeProfile profile, SessionCatalog catalog, Ai ai) {
         // Belt: drop avoided sessions in plain code so the rule holds even if the model slips.
         var menu = catalog.sessions().stream()
@@ -163,22 +169,23 @@ public class ConfPlannerAgent {
         return new ResearchedSessions(insights);
     }
 
-    // --- 4. Assemble a conflict-free schedule (LLM) — the goal ----------------------------
-    //   Note: this now consumes ResearchedSessions, so GOAP routes research before assemble.
-    //
-    // TODO (Lab 3): guard this goal so the invariant actually bites at runtime.
-    //   - split assembly: have assembleSchedule produce a DraftSchedule (post = "noDoubleBooking",
-    //     canRerun = true) and add an @AchievesGoal confirmSchedule(DraftSchedule) with
-    //     pre = "noDoubleBooking" — a clashing draft then never satisfies the goal;
-    //   - add @Condition noDoubleBooking(DraftSchedule) and @Condition hasCandidates(CandidateSessions);
-    //   - have shortlistSessions post "hasCandidates" and add pre = "hasCandidates" to assemble;
-    //   - add a Budget (ProcessOptions) in ConfPlannerShell;
-    //   - add a @SecureAgentTool premium action. See labs/lab3-guardrails.md.
+    // --- Conditions (side-effect-free invariants the planner re-checks each cycle) ----------
 
-    @AchievesGoal(description = "Produce a conflict-free personal schedule")
-    @Action
-    PersonalSchedule assembleSchedule(AttendeeProfile profile, ResearchedSessions researched, Ai ai) {
-        var sessions = researched.insights().stream().map(SessionInsight::session).toList();
+    @Condition(name = "hasCandidates")
+    boolean hasCandidates(CandidateSessions candidates) {
+        return candidates != null && !candidates.sessions().isEmpty();
+    }
+
+    @Condition(name = "noDoubleBooking")
+    boolean noDoubleBooking(DraftSchedule draft) {
+        var slots = draft.items().stream().map(ScheduleItem::slot).toList();
+        return slots.size() == new java.util.HashSet<>(slots).size();
+    }
+
+    // --- 4. Assemble a draft schedule (LLM) -----------------------------------------------
+
+    @Action(pre = {"hasCandidates"}, post = {"noDoubleBooking"}, canRerun = true)
+    DraftSchedule assembleSchedule(AttendeeProfile profile, ResearchedSessions researched, Ai ai) {
         var menu = researched.insights().stream()
                 .map(i -> menuLine(i.session()) + " @ " + i.session().slot()
                         + " — score " + i.matchScore() + " — " + i.whyRelevant())
@@ -197,14 +204,42 @@ public class ConfPlannerAgent {
                         # Attendee goals
                         %s
 
-                        # Shortlist (id: title [tags] (track, level) @ slot)
+                        # Shortlist (id: title [tags] (track, level) @ slot — score — why)
                         %s
                         """.formatted(profile.goals(), menu));
 
+        var sessions = researched.insights().stream().map(SessionInsight::session).toList();
         var items = resolve(sessions, draft.sessionIds()).stream()
                 .map(s -> new ScheduleItem(s, s.slot()))
                 .toList();
-        return new PersonalSchedule(items, draft.rationale());
+        return new DraftSchedule(items, draft.rationale());
+    }
+
+    // --- 5. Confirm the draft (plain code, goal) — only runs if noDoubleBooking holds ------
+
+    @AchievesGoal(description = "Produce a conflict-free personal schedule")
+    @Action(pre = {"noDoubleBooking"})
+    PersonalSchedule confirmSchedule(DraftSchedule draft) {
+        return new PersonalSchedule(draft.items(), draft.rationale());
+    }
+
+    // --- 6. Premium briefing (secured — never scheduled by GOAP, MCP-only) ----------------
+
+    @SecureAgentTool("hasAuthority('conf:premium')")
+    PremiumBriefing premiumBriefing(ResearchedSessions researched, Ai ai) {
+        var summary = ai
+                .withDefaultLlm()
+                .creating(String.class)
+                .fromPrompt("""
+                        Write a two-sentence premium briefing for a senior platform engineer
+                        based on these researched sessions.
+
+                        # Sessions
+                        %s
+                        """.formatted(researched.insights().stream()
+                        .map(i -> i.session().title() + " — " + i.whyRelevant())
+                        .collect(Collectors.joining("\n"))));
+        return new PremiumBriefing(summary);
     }
 
     // --- helpers --------------------------------------------------------------------------
