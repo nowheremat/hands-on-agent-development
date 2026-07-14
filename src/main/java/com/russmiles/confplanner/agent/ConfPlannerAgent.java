@@ -8,9 +8,11 @@ import com.embabel.agent.domain.io.UserInput;
 import com.russmiles.confplanner.domain.AttendeeProfile;
 import com.russmiles.confplanner.domain.CandidateSessions;
 import com.russmiles.confplanner.domain.PersonalSchedule;
+import com.russmiles.confplanner.domain.ResearchedSessions;
 import com.russmiles.confplanner.domain.ScheduleItem;
 import com.russmiles.confplanner.domain.Session;
 import com.russmiles.confplanner.domain.SessionCatalog;
+import com.russmiles.confplanner.domain.SessionInsight;
 import com.russmiles.confplanner.service.CatalogService;
 
 import java.util.List;
@@ -27,9 +29,10 @@ import java.util.stream.Collectors;
  *
  * <pre>
  *   UserInput
- *     -&gt; extractAttendeeProfile  (LLM)      =&gt; AttendeeProfile
+ *     -&gt; extractAttendeeProfile  (LLM)       =&gt; AttendeeProfile
  *     -&gt; loadCatalog             (plain code) =&gt; SessionCatalog
- *     -&gt; shortlistSessions       (LLM)      =&gt; CandidateSessions
+ *     -&gt; shortlistSessions       (LLM)       =&gt; CandidateSessions
+ *     -&gt; researchSessions        (LLM)       =&gt; ResearchedSessions
  *     -&gt; assembleSchedule        (LLM, goal) =&gt; PersonalSchedule
  * </pre>
  *
@@ -57,6 +60,12 @@ public class ConfPlannerAgent {
     /** What the model returns when assembling: an ordered, clash-free set of ids, plus the rationale. */
     record ScheduleDraft(List<String> sessionIds, String rationale) {
     }
+
+    /** What the model returns per session during research: id, why relevant, score. */
+    record Insight(String sessionId, String whyRelevant, double matchScore) {}
+
+    /** The model's full research output: one Insight per shortlisted session. */
+    record ResearchOutput(List<Insight> insights) {}
 
     // --- 1. Understand the attendee (LLM) -------------------------------------------------
 
@@ -125,38 +134,70 @@ public class ConfPlannerAgent {
         return new CandidateSessions(chosen);
     }
 
-    // TODO (Lab 2): add an `@Action ResearchedSessions researchSessions(CandidateSessions, Ai)`
-    //   between shortlist and assemble, then change assembleSchedule below to consume
-    //   ResearchedSessions instead of CandidateSessions. Do NOT reorder anything by hand — the
-    //   planner re-derives shortlist -> research -> assemble from the new types. See labs/lab2-goap.md.
+    // --- 3b. Research each shortlisted session (LLM) --------------------------------------
+
+    @Action
+    ResearchedSessions researchSessions(CandidateSessions candidates, Ai ai) {
+        var menu = candidates.sessions().stream()
+                .map(ConfPlannerAgent::menuLine)
+                .collect(Collectors.joining("\n"));
+
+        var output = ai
+                .withDefaultLlm()
+                .creating(ResearchOutput.class)
+                .fromPrompt("""
+                        For each session in the list, explain why it is relevant to a senior
+                        platform engineer and give a match score from 0.0 to 1.0.
+
+                        Return one entry per session with: sessionId, whyRelevant, matchScore.
+
+                        # Sessions
+                        %s
+                        """.formatted(menu));
+
+        var byId = candidates.sessions().stream()
+                .collect(Collectors.toMap(Session::id, Function.identity(), (a, b) -> a));
+
+        var insights = (output.insights() == null ? List.<Insight>of() : output.insights())
+                .stream()
+                .filter(i -> byId.containsKey(i.sessionId()))
+                .map(i -> new SessionInsight(byId.get(i.sessionId()), i.whyRelevant(), i.matchScore()))
+                .toList();
+
+        return new ResearchedSessions(insights);
+    }
 
     // --- 4. Assemble a conflict-free schedule (LLM) — the goal ----------------------------
 
     @AchievesGoal(description = "Produce a conflict-free personal schedule")
     @Action
-    PersonalSchedule assembleSchedule(AttendeeProfile profile, CandidateSessions candidates, Ai ai) {
-        var menu = candidates.sessions().stream()
-                .map(s -> menuLine(s) + " @ " + s.slot())
+    PersonalSchedule assembleSchedule(AttendeeProfile profile, ResearchedSessions researched, Ai ai) {
+        var menu = researched.insights().stream()
+                .map(i -> menuLine(i.session()) + " @ " + i.session().slot()
+                        + " (score: " + i.matchScore() + " — " + i.whyRelevant() + ")")
                 .collect(Collectors.joining("\n"));
 
         var draft = ai
                 .withDefaultLlm()
                 .creating(ScheduleDraft.class)
                 .fromPrompt("""
-                        Build this attendee a personal schedule from the shortlisted sessions.
+                        Build this attendee a personal schedule from the researched sessions.
 
                         Hard rule: never pick two sessions in the same slot (the "@ <day time>"
-                        suffix is the slot). Prefer their stated goals when a slot has a clash.
-                        Return the chosen session ids and a short rationale explaining the picks.
+                        suffix is the slot). Prefer higher match scores and stated goals when a
+                        slot has a clash. Return the chosen session ids and a short rationale.
 
                         # Attendee goals
                         %s
 
-                        # Shortlist (id: title [tags] (track, level) @ slot)
+                        # Shortlist (id: title [tags] (track, level) @ slot (score — why))
                         %s
                         """.formatted(profile.goals(), menu));
 
-        var items = resolve(candidates.sessions(), draft.sessionIds()).stream()
+        var sessions = researched.insights().stream()
+                .map(SessionInsight::session)
+                .toList();
+        var items = resolve(sessions, draft.sessionIds()).stream()
                 .map(s -> new ScheduleItem(s, s.slot()))
                 .toList();
         return new PersonalSchedule(items, draft.rationale());

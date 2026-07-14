@@ -62,15 +62,15 @@ public class MockLlmService implements LlmService<MockLlmService> {
      * unmatched prompt yields {@code {}} rather than an error, so a stray call degrades gracefully.
      */
     private String cannedJsonFor(String prompt) {
-        // AttendeeProfile(interests, role, experienceLevel, goals) — the baseline 4-field shape,
-        // no avoidTopics yet (that arrives in Lab 1).
+        // AttendeeProfile(interests, role, experienceLevel, goals, avoidTopics).
         if (prompt.contains("extract a structured profile")) {
             return """
                     {
                       "interests": ["kubernetes", "resilience", "developer-experience"],
                       "role": "Senior Platform Engineer",
                       "experienceLevel": "Advanced",
-                      "goals": ["level up platform work"]
+                      "goals": ["level up platform work"],
+                      "avoidTopics": []
                     }
                     """;
         }
@@ -80,6 +80,19 @@ public class MockLlmService implements LlmService<MockLlmService> {
                     {
                       "sessionIds": ["PC-01", "PC-02", "PC-03", "SR-09"],
                       "reasoning": "match interests"
+                    }
+                    """;
+        }
+        // ConfPlannerAgent.ResearchOutput — one insight per shortlisted session.
+        if (prompt.contains("why it is relevant")) {
+            return """
+                    {
+                      "insights": [
+                        {"sessionId": "PC-01", "whyRelevant": "core platform topic", "matchScore": 0.9},
+                        {"sessionId": "PC-02", "whyRelevant": "golden paths", "matchScore": 0.8},
+                        {"sessionId": "PC-03", "whyRelevant": "cost awareness", "matchScore": 0.7},
+                        {"sessionId": "SR-09", "whyRelevant": "resilience patterns", "matchScore": 0.85}
+                      ]
                     }
                     """;
         }
